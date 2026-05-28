@@ -136,6 +136,7 @@ RUN chmod +x /opt/lap/common.sh
 COPY --chown=sandbox:sandbox harnesses/opencode/sandbox-mcp.mjs /opt/lap/opencode-sandbox-mcp/sandbox-mcp.mjs
 COPY --chown=sandbox:sandbox harnesses/opencode/memory-mcp.mjs /opt/lap/opencode-sandbox-mcp/memory-mcp.mjs
 COPY --chown=sandbox:sandbox harnesses/opencode/report-issue-mcp.mjs /opt/lap/opencode-sandbox-mcp/report-issue-mcp.mjs
+COPY --chown=sandbox:sandbox harnesses/opencode/cronscheduler-mcp.mjs /opt/lap/opencode-sandbox-mcp/cronscheduler-mcp.mjs
 COPY --chown=sandbox:sandbox harnesses/opencode/gen-mcp-config.mjs /opt/lap/opencode-sandbox-mcp/gen-mcp-config.mjs
 COPY --chown=sandbox:sandbox harnesses/opencode/package.json /opt/lap/opencode-sandbox-mcp/package.json
 COPY --from=mcp-deps --chown=sandbox:sandbox /mcp/node_modules /opt/lap/opencode-sandbox-mcp/node_modules

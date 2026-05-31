@@ -6,6 +6,8 @@ export interface OpencodeSession {
   /** @deprecated use agent */
   harness?: string;
   time?: { created: number; updated?: number };
+  /** Opaque SSE token for EventSource authentication (replaces ?key=MASTER_KEY) */
+  sseToken?: string;
   [k: string]: unknown;
 }
 

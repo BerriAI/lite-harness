@@ -90,6 +90,11 @@ pluginRegistry.register(new VaultPlugin());
 pluginRegistry.register(new HelpPlugin());
 pluginRegistry.register(new LoopPlugin());
 pluginRegistry.register(new AgentPlugin());
+
+// SSE token management — short-lived opaque tokens to avoid exposing
+// MASTER_KEY in URL query params (which leak into logs, browser history, etc.).
+const sseTokens = new Map(); // token -> { sessionId, createdAt }
+
 function authOk(req, urlObj) {
   if (!MASTER_KEY) return true;
   const h = req.headers["authorization"] || req.headers["Authorization"];
@@ -97,8 +102,12 @@ function authOk(req, urlObj) {
     const m = h.match(/^Bearer\s+(.+)$/);
     if (m && m[1] === MASTER_KEY) return true;
   }
-  // EventSource can't set headers; allow `?key=` query param for /event.
-  if (urlObj && urlObj.searchParams.get("key") === MASTER_KEY) return true;
+  // EventSource can't set headers; validate opaque SSE token from query param.
+  // Tokens are issued at session creation time and are single-use per session.
+  if (urlObj) {
+    const tokenParam = urlObj.searchParams.get("token");
+    if (tokenParam && sseTokens.has(tokenParam)) return true;
+  }
   return false;
 }
 
@@ -1376,15 +1385,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const id = `ses_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+      const sseToken = `sse_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
       const now = Date.now();
       const s = { id, title: body.title || "New session", time: { created: now }, history: [], busSubscribers: new Set() };
       copilotSessions.set(id, s);
       sessionAgent.set(id, "github-copilot");
       sessionHarness.set(id, "github-copilot");
+      sseTokens.set(sseToken, { sessionId: id, createdAt: now });
       persistSession({ id, harness: "github-copilot", title: s.title, createdAt: now, tz: sessionTz });
       log(`copilot session created id=${id} title=${JSON.stringify(s.title)}`);
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id, title: s.title, time: s.time, agent: "github-copilot" }));
+      res.end(JSON.stringify({ id, title: s.title, time: s.time, agent: "github-copilot", sseToken }));
       return;
     }
 
@@ -1395,15 +1406,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const id = `ses_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+      const sseToken = `sse_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
       const now = Date.now();
       const s = { id, title: body.title || "New session", time: { created: now }, history: [], busSubscribers: new Set(), activeProcess: null };
       codexSessions.set(id, s);
       sessionAgent.set(id, "codex");
       sessionHarness.set(id, "codex");
+      sseTokens.set(sseToken, { sessionId: id, createdAt: now });
       persistSession({ id, harness: "codex", title: s.title, createdAt: now, tz: sessionTz });
       log(`codex session created id=${id} title=${JSON.stringify(s.title)}`);
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id, title: s.title, time: s.time, agent: "codex" }));
+      res.end(JSON.stringify({ id, title: s.title, time: s.time, agent: "codex", sseToken }));
       return;
     }
 
@@ -1414,15 +1427,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const id = `ses_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+      const sseToken = `sse_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
       const now = Date.now();
       const s = { id, title: body.title || "New session", time: { created: now }, agent: "claude-code", sdkSessionId: null, abortController: null, history: [], busSubscribers: new Set(), systemPrompt: systemPromptOverride };
       ccSessions.set(id, s);
       sessionAgent.set(id, "cc");
       sessionHarness.set(id, "cc");
+      sseTokens.set(sseToken, { sessionId: id, createdAt: now });
       persistSession({ id, harness: "cc", title: s.title, createdAt: now, tz: sessionTz });
       log(`cc session created id=${id} title=${JSON.stringify(s.title)}`);
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id, title: s.title, time: s.time, agent: "claude-code" }));
+      res.end(JSON.stringify({ id, title: s.title, time: s.time, agent: "claude-code", sseToken }));
       return;
     }
 
@@ -1431,6 +1446,7 @@ const server = http.createServer(async (req, res) => {
     log(`session create: materialized ${n} skill(s) title=${JSON.stringify(body.title || "")}`);
     const { harness: _h, agent: _a, ...forwardBody } = body;
     forwardBody.mcp = { ...(forwardBody.mcp || {}), platform: { type: "remote", url: PLATFORM_MCP_URL, enabled: true } };
+    const sseToken = `sse_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
     const upReq = http.request(UP + "/session", { method: "POST", headers: { "content-type": "application/json" } }, (upRes) => {
       let respData = "";
       upRes.on("data", c => respData += c);
@@ -1440,7 +1456,11 @@ const server = http.createServer(async (req, res) => {
           if (parsed.id) {
             sessionAgent.set(parsed.id, "opencode");
             sessionHarness.set(parsed.id, "opencode");
+            sseTokens.set(sseToken, { sessionId: parsed.id, createdAt: Date.now() });
             persistSession({ id: parsed.id, harness: "opencode", title: parsed.title || "New session", createdAt: Date.now(), tz: sessionTz });
+            // Inject sseToken into the response
+            const enhanced = { ...parsed, sseToken };
+            respData = JSON.stringify(enhanced);
           }
         } catch {}
         res.writeHead(upRes.statusCode || 200, upRes.headers);
@@ -1707,6 +1727,12 @@ const server = http.createServer(async (req, res) => {
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
+
+    // Extract and invalidate the SSE token — tokens are single-use per connection.
+    const tokenParam = url.searchParams.get("token");
+    if (tokenParam && sseTokens.has(tokenParam)) {
+      sseTokens.delete(tokenParam);
+    }
 
     const ccPush = (line) => { try { res.write(line); } catch {} };
     ccGlobalBus.add(ccPush);

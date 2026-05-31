@@ -2,6 +2,7 @@ import type { Agent, AgentFile, HarnessMessage, Memory, OpencodeSession, Skill }
 
 const BASE = "";
 const MASTER_KEY_STORAGE = "lite-harness-master-key";
+const SSE_TOKEN_STORAGE = "lite-harness-sse-tokens";
 
 export class ApiError extends Error {
   status: number;
@@ -35,6 +36,44 @@ export function clearStoredMasterKey(): void {
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.removeItem(MASTER_KEY_STORAGE);
+  } catch {
+    /* noop */
+  }
+}
+
+// SSE token storage — per-session tokens to avoid exposing MASTER_KEY in URLs
+export function getSseToken(sessionId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(SSE_TOKEN_STORAGE);
+    if (!raw) return null;
+    const tokens = JSON.parse(raw) as Record<string, string>;
+    return tokens[sessionId] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setSseToken(sessionId: string, token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.sessionStorage.getItem(SSE_TOKEN_STORAGE);
+    const tokens = raw ? JSON.parse(raw) : {};
+    tokens[sessionId] = token;
+    window.sessionStorage.setItem(SSE_TOKEN_STORAGE, JSON.stringify(tokens));
+  } catch {
+    /* noop */
+  }
+}
+
+export function clearSseToken(sessionId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.sessionStorage.getItem(SSE_TOKEN_STORAGE);
+    if (!raw) return;
+    const tokens = JSON.parse(raw);
+    delete tokens[sessionId];
+    window.sessionStorage.setItem(SSE_TOKEN_STORAGE, JSON.stringify(tokens));
   } catch {
     /* noop */
   }
@@ -90,7 +129,12 @@ export async function createSession(title?: string, agent?: string): Promise<Ope
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ title, ...(agent ? { agent } : {}) }),
   });
-  return jsonOrThrow<OpencodeSession>(res);
+  const session = jsonOrThrow<OpencodeSession>(res);
+  // Store the SSE token for this session if provided
+  if (session.sseToken) {
+    setSseToken(session.id, session.sseToken);
+  }
+  return session;
 }
 
 export async function listAgents(): Promise<Agent[]> {
@@ -408,8 +452,9 @@ export function subscribeEvents(opts: {
 }): () => void {
   let es: EventSource | null = null;
   try {
-    const key = getStoredMasterKey();
-    const qs = key ? `?key=${encodeURIComponent(key)}` : "";
+    // Use session-specific SSE token instead of MASTER_KEY in URL
+    const token = getSseToken(opts.sessionId);
+    const qs = token ? `?token=${encodeURIComponent(token)}` : "";
     es = new EventSource(BASE + "/event" + qs);
   } catch (e) {
     opts.onError?.(e);
@@ -431,6 +476,8 @@ export function subscribeEvents(opts: {
   return () => {
     try {
       es?.close();
+      // Clean up the token after use (tokens are single-use)
+      clearSseToken(opts.sessionId);
     } catch {
       /* noop */
     }
